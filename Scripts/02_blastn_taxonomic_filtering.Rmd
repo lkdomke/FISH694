@@ -1,0 +1,581 @@
+
+Read the taxonomy files back into Rstudio after performing the blastn search.
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+
+```
+
+```{r}
+pool_taxonomy <-read.delim("Data/eDNA_analysis/blast_DADA2_outputs/MiFish_96perc_shorttaxlineage.txt", header = FALSE)
+asvtable <- read.csv("Data/eDNA_analysis/blast_DADA2_outputs/MiFish_ASVtable.csv")
+
+head(asvtable)
+head(pool_taxonomy)
+```
+
+
+
+# clean up the header a bit
+
+```{r}
+# use the full taxonomy rather than the seq id to collapse identical entries
+pool_tax_df <- pool_taxonomy %>%
+  filter(V4 > 100) %>% # make sure all retained matches are >100 bp
+  dplyr::select(-V2, -V5, -V6, -V7, -V14, -V8, -V9, -V10, -V11, -V12, -V15, -V16) %>%  #remove unnecessary columns
+  group_by(V1, V17) %>% # group by the sequence key and the full taxonomy to reduce duplicate entries
+  unique() %>% # doing that reduced the number of entries from 29245 to 3207, seems like a lot? 
+  rename(qseqid=V1, perc_id=V3, length=V4, sscinames=V13, taxonomy=V17) %>% #rename headers
+#  filter(!str_detect(sscinames, "environmental")) %>% # filter out any environmental samples
+#  filter(!str_detect(sscinames, "synthetic")) %>% # filter out any synthetic "samples"
+  filter(perc_id >= 98) # seems like some of the matches below 98% are dubious (jellyfish and herring <1% different??)
+
+# large reduction from full taxonomy to pool taxonomy df
+```
+
+```{r}
+list <- pool_tax_df %>%
+  filter(perc_id >=98) %>% #just looking at species with >98% identity
+  ungroup() %>%
+  group_by(qseqid) %>% #how many unique taxonomic entries per qseqid?
+  add_tally(name = "n_taxa") %>%
+  filter(n_taxa == 1) %>% # only one taxonomic match
+  ungroup() %>%
+  dplyr::select(sscinames) %>%
+  unique()
+  
+```
+LD - 30 species with greater than 98% identity with one unique taxonomic entry per ASV ID (what does this mean exactly?)
+
+
+Maybe break up that taxonomic info so that we can focus on the things that we can identify to some relevant level (at least order!?)
+
+```{r}
+# first figure out where there are issues with that taxonomy format:
+genus.hybrids <- pool_tax_df %>%
+  filter(!str_detect(taxonomy, ";")) %>% 
+  # looking at these, they're probably hybrids or not good species, which is why the taxonomy broke down. 
+  separate(sscinames, into = c("genus"), extra = "drop", remove = FALSE)
+#LD there's so many unique genus here - are they truly all hybrids and what does that mean exactly?
+unique(genus.hybrids$sscinames)
+# looks like there are definitely some issues with the Sebastes (as we might expect)
+
+# and where there aren't issues
+taxon_df <- pool_tax_df %>%
+  filter(str_detect(taxonomy, ";")) %>%
+  separate(taxonomy, into=c("kingdom", "phylum", "class", "order", "family", "genus", "species"), sep = ";")
+
+# create a separate taxonomic lineage df with unique entries
+lineage_df <- taxon_df %>%
+  ungroup() %>%
+  dplyr::select(kingdom, phylum, class, order, family, genus) %>%
+  unique()
+
+# there are only 14 unique genera in this small messed up part of the dataset 
+unique(genus.hybrids$genus)
+genus_fixed <- genus.hybrids %>%
+  ungroup() %>%
+  dplyr::select(genus) %>%
+  unique() %>% # can I fix the lineage by adding existing data?
+  left_join(lineage_df, by = "genus") 
+
+# %>% # now the Tachyeres duck is the only loner, not in this data set dont need to do
+# fix that manually
+#  mutate(family = ifelse(genus == "Tachyeres", 
+#                         "Anatidae", family)) %>%
+#    mutate(order = ifelse(genus == "Tachyeres",
+#                        "Anseriformes", order)) %>%
+#      mutate(class = ifelse(genus == "Tachyeres",
+#                        "Aves", class)) %>%
+#        mutate(phylum = ifelse(genus == "Tachyeres", 
+#                               "Chordata", phylum)) %>%
+#          mutate(kingdom = ifelse(genus == "Tachyeres",
+#                                    "Eukaryota", kingdom))
+
+# add the lineage info back to the rest of the data
+genus_fixed_df <- genus.hybrids %>%
+  ungroup() %>%
+  left_join(genus_fixed, by = "genus") %>%
+  dplyr::select(-taxonomy)
+```
+
+
+```{r}
+# and merge them together
+fixed_tax_df <- taxon_df %>%
+  bind_rows(genus_fixed_df) %>%
+  # and fix the species syntax with underscores
+   mutate_if(is.character, str_replace_all, ' ', '_') 
+
+```
+
+## Sort and clean-up the results based on % identity
+
+```{r total-n-seqs}
+# how many total sequences?
+fixed_tax_df %>%
+  dplyr::select(qseqid) %>%
+  unique()
+# There are 443 total unique sequences, however there are some missing along the way so the largest "value" is ASV574
+```
+
+There are four categories:
+1. sequences that match a single species unambiguously (the minority)
+
+Sequences that match multiple species are divided in three categories:
+2. top matches > 2% identity than second-ranked matches
+3. top matches < 2% identity than second-ranked matches
+4. Multiple top matches with the same % identity
+
+```{r}
+# 1. sequences that are unambiguously a single species
+single_spp_seqs <- fixed_tax_df %>% 
+  group_by(qseqid) %>%
+  add_tally(name = "n_taxa") %>%
+  filter(n_taxa == 1)
+
+# LD - so there are 105 ASVs assigned to a single species, this is equal to 30 species level assignments
+unique(single_spp_seqs$sscinames)
+```
+105 sequences are single-species
+
+
+```{r}
+# remove the single-species seqs from the dataframe and then rank the hits by % identity for the remaining seqs
+seq_id_diff <- fixed_tax_df %>%
+  anti_join(., single_spp_seqs) %>%
+  dplyr::select(-length) %>%
+  group_by(qseqid, species, genus, family, order, class, phylum, kingdom) %>%
+    mutate(seq_percID = max(perc_id)) %>%
+    group_by(qseqid, species, genus, family, order, class, phylum, kingdom, seq_percID) %>%
+  summarise(max(seq_percID)) %>% # take just the top hit for each taxon (for each sequence)
+  dplyr::select(-`max(seq_percID)`) %>%
+  ungroup() %>%
+  group_by(qseqid) %>%
+      mutate(id_rank = rank(desc(seq_percID), ties.method = "min")) %>% # rank the taxonomic hits per sequence by % id
+      mutate(top_perc = max(seq_percID)) %>% # designate the highest % id for the best taxonomic hit in each sequence (in some, but not all cases, this is 100%)   
+      mutate(diff = top_perc - seq_percID) %>% # calculate the difference between the % identity of the top hit and each subsequent taxonomic hit
+        arrange(diff)
+
+seq_id_diff %>%
+  filter(diff > 0)
+
+```
+
+Now I have the single best entry for each species for each sequence ranked and with the difference between the first and second ranked entries calculated.
+
+For sequences with multiple top hits, where the difference between ranked taxa = 0, I will end up defaulting to genus- or family-level ID (or carrying the individual species info around in some capacity). I will do the same for any sequences where the difference betweeen the first and second ranked taxa is < 2%.
+
+```{r}
+# seqs with single top hit
+# seq_id_diff %>%
+#   ungroup() %>%
+#   group_by(qseqid) %>%
+#   filter(id_rank == 1) %>% 
+#   tally() %>% # how many taxa are top-ranked for a given sequence?
+#   filter(n == 1) # only those with a single top-ranked taxon will be tested for the 2% difference
+#   
+```
+
+figure out which differences are > 2% and eliminate those first?
+```{r}
+# filter out any taxa that are >2% less matching identity than the top taxonomic hit for a given sequence
+to_remove_low_perc_hits <- seq_id_diff %>%
+  ungroup() %>%
+  group_by(qseqid) %>%
+  filter(diff > 2) # none, LD- I think this is good
+
+keepers <- seq_id_diff %>%
+  anti_join(to_remove_low_perc_hits)
+
+```
+
+```{r}
+# this data frame includes only those taxonomic hits that should be considered.
+# so now I need to determine whether they should be assigned to genus, family, order, etc. 
+singletons <- keepers %>%
+  dplyr::select(qseqid) %>%
+  tally() %>%
+  filter(n == 1) #  LD - df of 16 sequence variants
+
+# these are the seqs that now have only a single match (LD - of occurence?)
+singleton_df <- singletons %>%
+  left_join(keepers) %>%
+  dplyr::select(-n) %>%
+  bind_rows(single_spp_seqs) # combine the single spp data
+
+## Genus-level matches
+# remove the singletons from the bigger df 
+single_genus <- keepers %>%
+  anti_join(singleton_df)%>% # at best, these should be genus-level matches
+  group_by(qseqid, genus) %>%
+  tally() %>%
+  ungroup() %>%
+  group_by(qseqid) %>%
+  tally() %>%
+  filter(n == 1) %>% # seqs that match a single genus
+  dplyr::select(-n) %>%
+  left_join(., keepers) %>%
+  mutate(taxonomic_level = "genus") %>%
+  mutate(taxon = genus)
+  
+
+## Family-level matches
+single_family <- keepers %>%
+  anti_join(singleton_df)%>%
+  anti_join(single_genus) %>%
+  group_by(qseqid, family) %>%
+  tally() %>%
+  ungroup() %>%
+  group_by(qseqid) %>%
+  tally() %>%
+  filter(n == 1) %>% # seqs that match a single family
+  dplyr::select(-n) %>%
+  left_join(., keepers) %>%
+  mutate(taxonomic_level = "family") %>%
+  mutate(taxon = family)
+
+
+## Order-level matches
+single_order <- keepers %>%
+  anti_join(singleton_df)%>%
+  anti_join(single_genus) %>%
+  anti_join(single_family) %>%
+  group_by(qseqid, order) %>%
+  tally() %>%
+  ungroup() %>%
+  group_by(qseqid) %>%
+  tally() %>%
+  filter(n == 1) %>% # seqs that match a single order
+  dplyr::select(-n) %>%
+  left_join(., keepers) %>%
+  mutate(taxonomic_level = "order") %>%
+  mutate(taxon = order)
+# LD - 19 order level matches
+
+## Class-level matches
+single_class <- keepers %>%
+  anti_join(singleton_df)%>%
+  anti_join(single_genus) %>%
+  anti_join(single_family) %>%
+  anti_join(single_order) %>%
+  group_by(qseqid, class) %>%
+  tally() %>%
+  ungroup() %>%
+  group_by(qseqid) %>%
+  tally() %>% 
+  filter(n == 1) %>% # seqs that match a single class
+  dplyr::select(-n) %>%
+  left_join(., keepers) %>%
+  mutate(taxonomic_level = "class") %>%
+  mutate(taxon = class)
+# LD - 61 class level matches
+
+
+## Phylum-level matches
+single_phylum <- keepers %>%
+  anti_join(singleton_df)%>%
+  anti_join(single_genus) %>%
+  anti_join(single_family) %>%
+  anti_join(single_order) %>%
+  anti_join(single_class) %>%
+  group_by(qseqid, phylum) %>%
+  tally() %>%
+  ungroup() %>%
+  group_by(qseqid) %>%
+  tally() %>% 
+  filter(n == 1) %>% # seqs that match a single phylum
+  dplyr::select(-n) %>%
+  left_join(., keepers) %>%
+  mutate(taxonomic_level = "phylum") %>%
+  mutate(taxon = phylum)
+# LD - not phylum level
+
+# Kingdom level matches
+single_kingdom <- keepers %>%
+  anti_join(singleton_df)%>%
+  anti_join(single_genus) %>%
+  anti_join(single_family) %>%
+  anti_join(single_order) %>%
+  anti_join(single_class) %>%
+  group_by(qseqid, kingdom) %>%
+  tally() %>%
+  ungroup() %>%
+  group_by(qseqid) %>%
+  tally() %>% 
+  filter(n == 1) %>% # seqs that match a single kingdom
+  dplyr::select(-n) %>%
+  left_join(., keepers) %>%
+  mutate(taxonomic_level = "kingdom") %>%
+  mutate(taxon = kingdom)
+
+# LD - no kingdom level matches
+# LD As far as I can tell we didn't get the jellyfish in here being closely related to the herring. 
+```
+
+
+
+Adding that 98% filter in back up top.
+
+Modify the singleton_df to include the right variable headers
+```{r}
+single_spp <- singleton_df %>%
+  dplyr::select(-perc_id, -length, -sscinames, -n_taxa) %>%
+  mutate(taxonomic_level = "species") %>%
+  mutate(taxon = species)
+
+```
+
+```{r}
+# recombine the full data set now that the appropriate level of taxonomy has been determined
+sorted_tax_df <-bind_rows(single_kingdom, single_phylum, single_class, single_order, single_family, single_genus, single_spp)
+
+#sorted_tax_df %>% 
+#  write.csv("Data/poolseq_taxonomy_df_test_4-22-23.csv")
+```
+Okay, so that df should contain the basic taxa in the dataset assigned to the taxonomic level for which we can be relatively confident (>2% difference between the top-and-next highest hit).
+
+## Now, looking at the sample/sequence dataframe
+
+There are only 574 unique sequences that made it through the blast/taxonomy gauntlet, so why are there an order of magnitude more sequences in the seqtab.nochim data tables. Maybe because they didn't make it through the BLAST filtering? i.e., no match at >98% identity?
+
+
+1) I need to make the ASV-sample table usable without the actual sequences as the headers.
+2) read in the new, clean metadata and connect it with the sample info
+3) combine it all together
+
+## Read in ASV-sample table for Poolseq data
+
+```{r ASV-sample-table}
+asv_tbl <- read.csv("Data/eDNA_analysis/blast_DADA2_outputs/MiFish_ASVtable.csv") %>%
+  rename(sample.PCR = X) %>%
+  separate(sample.PCR, into = c("sample", "rep"), remove = F)
+
+# assuming the samples that don't conform to the sample-rep format are negative and positive controls
+asv_tbl %>% 
+  filter(!str_detect(sample.PCR, "e00"))
+```
+
+```{r merge-taxonomy-and-sample-tbl}
+# pivot longer for ease of joining
+asv_long_tbl <- asv_tbl %>%
+  pivot_longer(cols = 4:578, names_to = "ASV", values_to = "count") 
+
+# LD - have to adjust/rename the Seq to ASV to be able to merge two dataframes
+asv_long_tbl$ASV <- gsub("Seq", "ASV", asv_long_tbl$ASV)
+
+# join data frames
+uncollapsed_poolseq_tax_df <- asv_long_tbl %>%
+  left_join(., sorted_tax_df, by = c("ASV" = "qseqid"))
+
+
+# collapse these based on the appropriate taxonomic level
+collapsed_poolseq_tax_df <- uncollapsed_poolseq_tax_df %>%
+  dplyr::select(sample.PCR, sample, rep, ASV, count, taxon, taxonomic_level) %>% ## I need to go back and fix the missing % for the species-level hits
+  unique()
+
+```
+That data frame still contains a bunch of NAs that didn't have blast hits. Let's go ahead and remove them.
+
+```{r remove-NAs}
+poolseq_tax_tidydf <- collapsed_poolseq_tax_df %>%
+  filter(!is.na(taxon)) %>% # remove NAs
+  filter(count > 0) # remove entries with zero reads for that sequence
+
+```
+
+
+Add metadata to that tidy frame
+```{r read-in-metadata}
+# metadata tidied and ready to go
+# LD - this is based on the extraction database and quickly thrown together
+meta <- read.csv("Data/eDNA_2021_metadata.csv", stringsAsFactors = FALSE, header = TRUE)
+
+```
+
+
+```{r merge-asvs-samples-and-metadata}
+poolseq_tax_tidymeta <- poolseq_tax_tidydf %>%
+  left_join(meta, by = c("sample" = "Extraction_ID")) #%>%
+  #filter(!is.na(label)) # remove aquarium samples?
+
+# lets write this one out too
+#write.csv(poolseq_tax_tidymeta, "Data/eDNA_analysis/poolseq_tax_tidymeta_asvs.csv")
+```
+
+LD (4/15) Optional step: lets account for the field control counts - there's a triplicate (lab replicate) of each control sample
+In order to do this we need to keep the ASV specific data, so the next step in {r play-around-a-bit} where the ASVs are dropped are helpful to looking at the data the species information level we want to manipulate the control information first. 
+
+Notes: this is an optional step, can easily be skipped but *will give different information*
+```{r}
+glimpse(poolseq_tax_tidymeta)
+
+# lets drop (for now) the sites that were the aquarium samples
+edna.asvs <- poolseq_tax_tidymeta %>%
+  filter(sample != "e00005" & sample != "e00007" & sample != "e00010" & sample != "e00011" &
+          sample != "e00012" & sample != "e00013" & sample != "e00014" & sample != "e00015" &
+          sample != "e00016" & sample != "e00017") # now rows = 2680 from 3138
+
+edna.asvs <- edna.asvs %>%
+  group_by(ASV, sample, Sample_label) %>%
+  #mutate(count_by_ASV = sum(count)) %>% # removed this becasue it counts up all the asv regardless of lab replicate. 
+  dplyr::select(-rep) %>%
+  distinct() %>%
+  filter(Sample_label != "NA" & Sample_label != "") %>%
+  filter(SampleCode != "Extraction blank")# remove positive, negative, and extraction blanks
+
+edna.asvs$count <- as.numeric(edna.asvs$count)
+
+test <- edna.asvs %>%
+  filter(Sample_rep == "control") # how many rows with control rep, 158
+# loop across sites and filter by each sample and subtract the associated control numbers
+d <- data.frame()
+
+for(i in unique(1:20)) {
+  df <- edna.asvs 
+  sites <- unique(df$Sample_label)
+  s <- sites[i]
+  s.df <- filter(df, Sample_label == s)
+  s.rep.df <- filter(s.df,  Sample_rep != "control")
+  c.df <- filter(s.df, Sample_rep == "control") %>%
+    group_by(ASV, Sample_rep) %>%
+    dplyr::summarise(control_asv = sum(count))
+  c.df$control_asv <- as.numeric(c.df$control_asv)
+  df.asv <- left_join(s.rep.df, c.df, by = "ASV") %>%
+    mutate(control_asv = if_else(is.na(control_asv), 0, control_asv)) %>%
+    dplyr::select(-Sample_rep.y) %>%
+    mutate(counts_minus_control = count - control_asv) %>%
+    dplyr::rename(Sample_rep = Sample_rep.x)
+  df.asv$counts_minus_control <- ifelse(df.asv$counts_minus_control <0, 0, paste(df.asv$counts_minus_control))
+  d <- rbind(d, df.asv)
+}
+glimpse(d) # this dataframe is the ASV and species associated with that (sometimes multiple ASVs are associated with a single species)
+```
+
+
+```{r play-around-a-bit}
+poolseq_tax_filtered_w_meta <- poolseq_tax_tidymeta %>%
+  #arrange(distance) %>%
+  # filter(taxonomic_level != "kingdom") %>% # remove these totally uninformative matches, LD no kingdom matches in mine
+  # collapse multiple entries for the same taxon in the same sample replicate
+  group_by(sample.PCR, taxon) %>%
+  mutate(count = sum(count)) %>%
+  dplyr::select(-ASV) %>% 
+  unique() # that reduces the number of rows from 3133 to 2021
+
+d$counts_minus_control <- as.numeric(d$counts_minus_control)
+
+poolseq_tax_minus_control_w_meta <- d %>%
+  group_by(sample.PCR, taxon) %>%
+  mutate(counts_minus_controls = sum(counts_minus_control)) %>%
+  dplyr::select(-c(ASV, counts_minus_control, control_asv, count)) %>%
+  distinct() # reduced rows from 2489 to 1555 
+#write.csv(poolseq_tax_minus_control_w_meta, "Data/eDNA_tax_filtered_minus_controls.csv")
+#write.csv(poolseq_tax_filtered_w_meta, "Data/eDNA_tax_filtered_4-22-23.csv")
+```
+Note on the above csv that was written out - we'll use this one to compare bioinformatic pipelines
+
+
+That's pretty useful.
+
+Let's break it down in a few different ways:
+```{r}
+# extraction blanks
+poolseq_tax_filtered_w_meta %>%
+  filter(sample == "e00312" |sample == "e00336" |
+           sample == "e00360" | sample == "e00372") %>% # include only the extraction blanks
+  ggplot(aes(x = sample.PCR, y = count, fill = taxon)) +
+  geom_bar(stat = "identity") +
+   theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90),
+    axis.title.x = element_text(margin = margin(t=10))) +
+  labs(y = "reads", x = "extraction controls")
+#ggsave("MiFish_extraction_blanks.pdf")
+```
+
+```{r}
+# Field controls?
+poolseq_tax_filtered_w_meta %>%
+  filter(Sample_rep == "control", taxon != "Homo_sapiens") %>%
+  ggplot(aes(x=SampleCode, y=count, fill=taxon)) +
+    geom_bar(stat="identity") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90),
+    axis.title.x = element_text(margin = margin(t=10))) +
+  labs(y = "reads",x = "field control sites")
+
+# This is way more than I think it should be - some of the genus present in the controls should imo be present in the non controls, did we mess this up? 
+
+#ggsave("MiFish_field_blanks.pdf")
+```
+
+
+```{r}
+# pcr negatives
+poolseq_tax_filtered_w_meta %>%
+  filter(str_detect(sample.PCR, "NEGATIVE"), taxon != "Homo_sapiens") %>%
+  ggplot(aes(x=sample.PCR, y=count, fill=taxon)) +
+    geom_bar(stat="identity") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90),
+    axis.title.x = element_text(margin = margin(t=10))) +
+  labs(
+    y = "reads",
+    x = "PCR negative controls")
+
+#ggsave("pcr_negatives.pdf")
+
+# salmon and herring in the PCR negs? also why isn't there the neg contorl A? 
+```
+
+
+```{r}
+# positives?
+poolseq_tax_filtered_w_meta %>%
+  filter(str_detect(sample.PCR, "POSITIVE"), taxon != "Homo_sapiens") %>%
+  ggplot(aes(x=sample.PCR, y=count, fill=taxon)) +
+    geom_bar(stat="identity") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90),
+    axis.title.x = element_text(margin = margin(t=10))) +
+  labs(
+    y = "reads",
+    x = "PCR positive controls")
+
+# the positive controls contain Actinopteri (class level of Goldfish) but also some herring, shiner perc, cods, salmon, salmon and pricklebacks... is this frm index hoping?  
+# upside its mainly goldfish...
+#ggsave("pcr_positives.pdf")
+```
+I guess the goldfish doesn't show up at any taxonomic level higher than class?
+
+```{r}
+# species/genus/family-level matches?
+
+poolseq_tax_filtered_w_meta %>%
+  filter(!is.na(Sample_label), 
+         taxon != "Homo_sapiens",
+         taxon != "Canis_lupus",
+         taxonomic_level %in% c("species", "genus","family")) %>%
+  ggplot(aes(x=SampleCode, y=count, fill=taxon)) +
+    geom_bar(stat="identity") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90),
+    axis.title.x = element_text(margin = margin(t=10))
+  ) +
+  labs(
+    y = "reads",
+    x = "sample replicates"
+  )
+
+
+```
+
+

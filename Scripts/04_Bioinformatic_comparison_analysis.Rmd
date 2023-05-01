@@ -1,0 +1,468 @@
+---
+title: "bioinformatic_comparison_analysis"
+author: "Lia Domke"
+date: "4/24/2023"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Using the HPC we removed primers (edna-bioinformatics.sh) and then moved onto creating ASV tables. 
+We've created ASV tables using DADA2 (DADA2_bioninformatics.rmd) for our eDNA samples (collected summer 2021) and then put the same ASV table through two different bioinformatic pipeline. 
+
+# Blastn pipeline
+The first pipeline uses the nucleotide database from NCBI and blastn to align sequences with species identification 
+
+nohup blastn -remote -db nt -query MiFish_ASV_seqtab_nochim.csv -perc_identity 96 -qcov_hsp_perc 100 -out MiFish_ASV_blast.out -outfmt "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore sscinames staxids"
+
+This blastn code basically does a set cutoff of 96% similarity with 100% of the sequence. The 96% similarity on this length of region allows for some sequence error during Illumina sequencing. 
+We then created a custom R script (taxonomic_filtering_eDNA2021.Rmd) that goes through and looks at the similarity scores. When two assignments were less than 2% different from each other (so very similar) we defaulted to the next coarser taxonomic assignment (so moving from species to genus for example). 
+
+If the sequences were creater than 2% different than I assigned it to the top hit. See the script if you have further questions. 
+
+The end result is poolseq_taxonomy_df_test_4-22-23.csv file that has the pooled taxonomy and teh ASV identification
+
+And that df should contain the basic taxa in the dataset assigned to the taxonomic level for which we can be relatively confident (>2% difference between the top-and-next highest hit).
+
+# Insect pipeline
+
+The insect pipeline was created by Shaun Wilkinson. Insect trims the portion of the references sequences (nucleotide database from NCBI) that are associated with the primer binding region before splitting the reference sequences into groups while maximizing the differences between each group. To recursively split the references into groups a hidden Markov model is derived for each group creating new “nodes” to the classification tree. This allows training of the model using the known reference sequences that have confirmed taxonomic identification. The trained model is then used to identify the unknown taxonomic identification for the query sequences (ASVs generated from the collected eDNA dataset).
+This pipeline happens in the insect_bioinformatics.rmd
+
+
+# Goals of this script
+
+Okay so the first goal is to look at species assignments by ASV - these should coorespond to each other. So if ASV1 is classified to species level Clupea pallasi using the cutoff method then we should see a similar or same assignment with the insect pipeline. 
+
+What we want to compare is if there is an increase in species assignment using this fancy classificaation insect pipeline **spolier there isn't**
+
+
+This requires *data*
+```{r}
+blastn <- read.csv("Data/eDNA_tax_filtered_4-22-23.csv") # this includes all the metadata and controls still within the df
+blastn2 <- read.csv("Data/eDNA_analysis/poolseq_tax_tidymeta_asvs.csv") # includes metadata, controls, and asv
+insect <- read.csv("Data/insect_taxonomy_output.csv") # this is only the ASV sequences
+
+meta <- read.csv("Data/eDNA_2021_metadata.csv") # this has all the sample information
+asv <- read.csv("Data/eDNA_analysis/blast_DADA2_outputs/MiFish_ASVtable.csv") %>% # this has the ASV output from DADA2
+  rename(sample.PCR = X) %>%
+  separate(sample.PCR, into = c("sample", "rep"), remove = F)
+
+```
+
+```{r theme settings, include=FALSE}
+# Creates custom base plot theme that can adjust every graph that you use plot_theme for!
+
+plot_theme <- function() {
+  theme_bw(base_size = 20, base_family = "Avenir") %+replace%
+    theme(panel.background  = element_blank(),
+            plot.background = element_rect(fill="white", colour=NA), 
+            legend.background = element_rect(fill="transparent", colour=NA),
+            legend.key = element_rect(fill="transparent", colour=NA),
+            panel.grid.major = element_blank(), 
+            panel.grid.minor = element_blank(),
+            strip.background = element_rect(colour = "NA", fill = "grey96"))
+}
+
+# to use ggsave and export plots include argument 'device=cario_pdf' e.g.: 
+# ggsave("name.pdf", device=cairo_pdf, width = 6, height = 6)
+```
+## clean up insect output and add metadata
+
+```{r}
+glimpse(insect)
+glimpse(asv) 
+glimpse(meta)
+
+# first lets change the outputs from seq to asv cause right now these dont match up between datasets
+# assuming the samples that don't conform to the sample-rep format are negative and positive controls
+asv %>% 
+  filter(!str_detect(sample.PCR, "e00"))
+
+# pivot longer for ease of joining
+asv_long_tbl <- asv %>%
+  pivot_longer(cols = 4:578, names_to = "ASV", values_to = "count") 
+
+# have to adjust/rename the Seq to ASV to be able to merge two dataframes
+asv_long_tbl$ASV <- gsub("Seq", "ASV", asv_long_tbl$ASV)
+
+unique(insect$representative) # 575 ASVs
+unique(asv_long_tbl$ASV) # also 575 ASVs
+
+insect_meta <- insect %>%
+  left_join(asv_long_tbl, by = c("representative" = "ASV"))  %>%
+  left_join(meta, by = c("sample" = "Extraction_ID")) %>%
+  filter(count > 0) # remove entries with zero reads for that sequence, much more reasonable length now
+
+# there are aquarium samples that were run with mine but are not my data - they need to be removed
+insect_sub_asv <- insect_meta %>%
+  filter(sample != "e00005" & sample != "e00007" & sample != "e00010" & sample != "e00011" &
+          sample != "e00012" & sample != "e00013" & sample != "e00014" & sample != "e00015" &
+          sample != "e00016" & sample != "e00017") # reducing from 3319 to 2852
+
+insect_asv <- insect_sub_asv %>%
+  rename(ASV = representative) %>%
+  group_by(ASV, sample, Sample_label) %>%
+  #mutate(count_by_ASV = sum(count)) %>% # removed this becasue it counts up all the asv regardless of lab replicate. 
+  dplyr::select(-rep) %>%
+  distinct() %>%
+  filter(Sample_label != "NA" & Sample_label != "") %>% # this removes the positive negative controls
+  filter(SampleCode != "Extraction blank")# remove positive, negative, and extraction blanks
+
+```
+
+Remove aquarium samples and postive, negative, and extraction blanks for blastn
+```{r}
+blastn_sub <- blastn %>%
+  filter(sample != "e00005" & sample != "e00007" & sample != "e00010" & sample != "e00011" &
+          sample != "e00012" & sample != "e00013" & sample != "e00014" & sample != "e00015" &
+          sample != "e00016" & sample != "e00017") # reducing from 3319 to 2852
+
+blastn_asv <- blastn_sub %>%
+  group_by(sample, Sample_label) %>%
+  #mutate(count_by_ASV = sum(count)) %>% # removed this becasue it counts up all the asv regardless of lab replicate. 
+  dplyr::select(-rep) %>%
+  distinct() %>%
+  filter(Sample_label != "NA" & Sample_label != "") %>% # this removes the positive negative controls
+  filter(SampleCode != "Extraction blank") %>%
+  mutate(method = "blastn")
+
+
+######## do the similar steps with blastn2 and retain the ASV values
+blastn_sub2 <- blastn2 %>%
+  filter(sample != "e00005" & sample != "e00007" & sample != "e00010" & sample != "e00011" &
+          sample != "e00012" & sample != "e00013" & sample != "e00014" & sample != "e00015" &
+          sample != "e00016" & sample != "e00017") # reducing from 3319 to 2852
+
+blastn_asv2 <- blastn_sub2 %>%
+  group_by(sample, Sample_label) %>%
+  #mutate(count_by_ASV = sum(count)) %>% # removed this becasue it counts up all the asv regardless of lab replicate. 
+  dplyr::select(-rep) %>%
+  distinct() %>%
+  filter(Sample_label != "NA" & Sample_label != "") %>% # this removes the positive negative controls
+  filter(SampleCode != "Extraction blank") %>%
+  mutate(method = "blastn")
+
+## NOTE
+# different numbers of rows in blastn_asv and blastn_asv2 this is because blastn_asv2 hasn't dropped the asvs yet
+# we'll use those for some digging into who gets assigned to species and who gets assigned to a coarses taxonomic value
+```
+
+Now we have similar comparable dataframes
+```{r}
+glimpse(blastn_asv)
+glimpse(insect_asv)
+
+comb <- insect_asv %>%
+  mutate(method = "insect") %>%
+  full_join(blastn_asv, by = c("sample.PCR", "sample", "SampleCode", "Sample_label", "Sample_rep", "Sample_date", "Extraction_date", "method"))
+```
+
+## Compare species level assignment
+```{r}
+# lets look at this by asv
+
+ggplot(blastn_asv) +
+  geom_col(aes(x = sample, y = count, fill = taxonomic_level))
+
+ggplot(insect_asv) +
+  geom_col(aes(x = sample, y = count, fill = rank))
+```
+
+For blastn - number of each taxonomic assignment across all replicates/controls by site
+```{r}
+unique(blastn_asv$taxonomic_level) # species, genus, family, class
+b.species <- blastn_asv %>%
+  filter(taxonomic_level == "species") %>%
+  group_by(Sample_label) %>%
+  dplyr::summarise(species = length(unique(taxon))) 
+
+b.genus <- blastn_asv %>%
+  filter(taxonomic_level == "genus") %>%
+  group_by(Sample_label) %>%
+  dplyr::summarise(genus = length(unique(taxon)))
+
+b.family <- blastn_asv %>%
+  filter(taxonomic_level == "family") %>%
+  group_by(Sample_label) %>%
+  dplyr::summarise(family = length(unique(taxon)))
+
+b.class <- blastn_asv %>%
+  filter(taxonomic_level == "class") %>%
+  group_by(Sample_label) %>%
+  dplyr::summarise(class = length(unique(taxon)))
+
+b.order <- b.species %>%
+  left_join(b.genus) %>%
+  left_join(b.family) %>%
+  left_join(b.class) %>%
+  mutate(class = replace_na(class, 0))
+
+b.order <- b.order %>%
+  pivot_longer(cols = species:class, names_to = "level", values_to = "number") %>%
+  mutate(method = "blastn")
+
+```
+
+```{r}
+unique(insect_asv$rank) # a lot more
+# species, genuis, family, suborder, class, no rank, infraorder, subfamily, order
+
+d <- data.frame()
+for (i in unique(insect_asv$rank)) {
+  n_level <- filter(insect_asv, rank == i) %>%
+    group_by(Sample_label) %>%
+    dplyr::summarise(n_level = length(unique(taxon))) 
+  temp <- data.frame(level = i, Sample_label = unique(n_level$Sample_label), number = n_level$n_level)
+  d <- rbind(d, temp)
+}
+
+glimpse(d)
+insect.order <- d %>%
+  pivot_wider(names_from = level, values_from = number, values_fill = 0) %>%
+  pivot_longer(cols = c(species:order), names_to = "level", values_to = "number") %>%
+  mutate(method = "insect")
+```
+
+try combining again
+### combined species rank plot
+```{r}
+library(RColorBrewer)
+comb <- full_join(b.order, insect.order)
+
+comb %>%
+  mutate(level = fct_relevel(level, c("species", "genus", "subfamily", "family", "infraorder","suborder", "order", "class", "no rank"))) %>%
+  ggplot() +
+  geom_col(aes(x = method, y = number, fill = level)) + 
+  labs(x = "Bioinformatic Pipeline", y = "Number of taxonomic ranks") +
+  facet_wrap(~Sample_label) + plot_theme() + 
+  #scale_fill_jco()
+  scale_fill_manual(values = c("#1B9E77","#7570B3","#D95F02","#E7298A","#66A61E","#E6AB02","#A6761D","#CB0000B2","#666666"))
+
+```
+
+Lets zoom in on a single site and explore whats happening
+  Use the ASV values!
+```{r}
+# checking out Kah shakes kelp
+b.id <- blastn_asv2 %>%
+  filter(Sample_label == "Kah shakes kelp") %>%
+  ungroup() %>%
+  dplyr::select(taxon, taxonomic_level, ASV) %>%
+  distinct() %>%
+  mutate(method = "blastn")
+
+# how many asv are we talking? 
+unique(b.id$ASV)
+
+i.id <- insect_asv %>%
+  filter(Sample_label == "Kah shakes kelp") %>%
+  ungroup() %>%
+  dplyr::select(taxon, rank, ASV) %>%
+  distinct() %>%
+  mutate(method = "insect")
+
+# CAN WE JOIN THEM
+kah.shakes.kelp.comb <- full_join(i.id, b.id, by = "ASV") 
+
+  
+```
+
+For all sites
+```{r}
+all.b <- blastn_asv2 %>%
+  ungroup() %>%
+  dplyr::select(taxon, taxonomic_level, ASV) %>%
+  distinct() %>%
+  mutate(method = "blastn")
+
+all.i <- insect_asv %>%
+  ungroup() %>%
+  dplyr::select(taxon, rank, ASV) %>%
+  distinct() %>%
+  mutate(method = "insect")
+  
+all <- full_join(all.b, all.i, by = "ASV")
+
+# filter by instances where rank MATCHES
+match <- all %>%
+  filter(taxonomic_level == rank)
+
+library(gt)
+library(webshot2)
+ 
+matching.values <- match %>%
+  dplyr::rename(taxon_insect = taxon.y,
+                taxon_blastn = taxon.x) %>%
+  dplyr::select(-c(method.x, method.y)) %>%
+  dplyr::select(c(ASV, taxon_blastn, taxon_insect, rank)) %>%
+  arrange(taxon_blastn) %>%
+  gt()
+
+unique(match$taxon.x)
+unique(match$ASV) # 118 of the 574 ASVs
+
+gtsave(matching.values, "matching_values_tbl.png")
+```
+
+Which ones don't match?
+```{r}
+no.match <- all %>%
+  filter(taxonomic_level != rank) %>%
+  mutate(blast_value = ifelse(taxonomic_level == "species", 1,
+                                  ifelse(taxonomic_level == "genus", 2,
+                                         ifelse(taxonomic_level == "family", 4,
+                                                ifelse(taxonomic_level == "class", 8, NA))))) %>%
+  mutate(insect_value = ifelse(rank == "species", 1,
+                                  ifelse(rank == "genus", 2,
+                                         ifelse(rank == "subfamily", 3,
+                                                 ifelse(rank == "family", 4,
+                                                    ifelse(rank == "infraorder", 5,
+                                                           ifelse(rank == "suborder", 6,
+                                                                   ifelse(rank == "order", 7,
+                                                                             ifelse(rank == "class", 8,
+                                                                                    ifelse(rank == "no rank", 9, NA))))))))))
+                                            
+                                                                        
+                                                          
+unique(no.match$taxon.x) # 47 taxonomic id from blastn
+unique(no.match$taxon.y) # 39 taxonomic id from insect
+unique(no.match$ASV) # 309 ASVs (this is a total of 427 ASVs)
+
+# now we have values associated with taxonomic rank
+# lets determine for every asv which one did better
+no.match_best <- no.match %>%
+  mutate(best_pipeline = ifelse(blast_value < insect_value, paste("blastn"), paste("insect")))
+
+match2 <- data.frame(Var1 = c("match"), Freq = c(118))
+perc <- table(no.match_best$best_pipeline) %>%
+  data.frame() %>%
+  rbind(match2) %>%
+  mutate(percent = (Freq/427) *100) %>%
+  ggplot() +
+  geom_col(aes(x = Var1, y = percent)) + plot_theme() +
+  labs(y = "ASV assignment to finer taxonomic resolution (%)", 
+      x = "Pipeline type")
+
+  
+
+table(no.match_best$best_pipeline) %>%
+  data.frame() %>%
+  ggplot() +
+  geom_col(aes(x = Var1, y = Freq)) + plot_theme() +
+  labs(y = "Number of finer taxonomic ASV matches", x = "Pipeline Type")
+
+
+# Okay so which species does a better job with insect
+best.insect <- no.match_best %>%
+  filter(best_pipeline == "insect") %>%
+   dplyr::rename(taxon_insect = taxon.y,
+                taxon_blastn = taxon.x) %>%
+  dplyr::select(-c(method.x, method.y)) %>%
+  dplyr::select(c(ASV, taxon_blastn, taxon_insect, rank))%>%
+  mutate(num = as.numeric(str_extract(ASV, "\\d+"))) %>%
+  arrange(num) %>%
+  dplyr::select(-c(num, rank)) 
+
+unique(best.insect$ASV)
+unique(best.insect$taxon_insect)
+
+best.insect.tbl <- best.insect %>%
+  gt()
+
+
+#gtsave(best.insect.tbl, "table_insect_best_pipeline.png")
+```
+
+
+```{r}
+best.blastn <- no.match_best %>%
+  filter(best_pipeline == "blastn") %>%
+   dplyr::rename(taxon_insect = taxon.y,
+                taxon_blastn = taxon.x) %>%
+  dplyr::select(-c(method.x, method.y)) %>%
+  dplyr::select(c(ASV, taxon_blastn, taxon_insect, taxonomic_level))%>%
+  mutate(num = as.numeric(str_extract(ASV, "\\d+"))) %>%
+  arrange(num) #%>%
+  dplyr::select(-c(num, taxonomic_level))
+
+table <- best.blastn %>%
+  gt()
+
+best.blastn
+
+gtsave(table, "table_blast_best_pipeline.png")
+
+unique(best.blastn$taxon_blastn)
+unique(best.blastn$ASV)
+```
+
+
+Are there more species level assignments in insect or blast?
+```{r}
+glimpse(all)
+
+all.blastn <- table(all$taxonomic_level) %>%
+  data.frame()
+
+all.numbs <- table(all$rank) %>%
+  data.frame() %>%
+  left_join(all.blastn, by = "Var1") %>%
+  mutate(Freq.y = ifelse(is.na(Freq.y), 0, Freq.y)) %>%
+  dplyr::rename(insect = Freq.x, 
+                blastn = Freq.y) %>%
+  mutate(Var1 = fct_relevel(Var1, c("species", "genus", "subfamily", "family", "infraorder","suborder", "order", "class", "no rank"))) %>%
+  pivot_longer(cols = c(insect:blastn), values_to = "freq", names_to = "method")
+
+ggplot() +
+  geom_col(aes(x = Var1, y = freq, fill = method), data = all.numbs, 
+           position = position_dodge2()) + plot_theme() +
+  labs(y = "Number of assigned ASV", x = "Taxonomic rank") +
+  scale_fill_manual(values = c("#1B9E77","#7570B3"))
+  
+```
+
+
+What are all the no rank identifications?
+
+```{r}
+head(all)
+
+no.rank <- all %>%
+  filter(rank == "no rank")
+```
+
+What are the species level assignments for both pipeline types
+```{r}
+head(all)
+
+blast.sp <- all %>%
+  filter(taxonomic_level == "species") %>%
+  dplyr::select(taxon.x, taxonomic_level, method.x) %>%
+  distinct() %>%
+  dplyr::rename(taxon = taxon.x, 
+                rank = taxonomic_level, 
+                method = method.x) # 33 species, 115 ASVs
+
+blast.sp$taxon <- gsub("_", " ", blast.sp$taxon)
+  
+
+insect.sp <- all %>%
+  filter(rank == "species") %>%
+  dplyr::select(taxon.y, rank, method.y) %>%
+  distinct() %>%
+  dplyr::rename(taxon = taxon.y,
+                rank = rank, 
+                method = method.y) # 7 species, 11 ASVs
+
+all.species <- rbind(insect.sp, blast.sp) %>%
+  dplyr::select(-rank) %>%
+  gt()
+
+#gtsave(all.species, "all_species_rank_tbl.png")
+```
+

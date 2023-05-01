@@ -1,0 +1,287 @@
+---
+title: "eDNA_DADA2_bioinformatics"
+author: "Lia Domke"
+date: "2/4/2023"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Using the DADA2 Pipeline Tutorial (1.16) [link](https://benjjneb.github.io/dada2/tutorial.html) to generate the amplicon sequence variant (ASV) - so this is takes that data that comes from the illumina-sequed fastq files that Diana (w/ access to a virtual computer) has already split and removed barcodes/adaptes. 
+
+We can use this script to generate the exact number of ASV observed in each sample. We can also assigned taxonomy to the output sequences. 
+
+Assumes that data has:
+- samples have been demultiplexed (have per sample fastq files)
+- non-biological nucleotides removed (barcodes, primers, adaptor)
+- paired end sequencing data, forward and reserve fastq contains reads in matched order
+
+# Libraries
+```{r}
+# if not install can use devtools to install
+# install.packages("devtools")
+# library("devtools")
+# devtools::install_github("benjjneb/dada2", ref="v1.16") # change the ref argument to get other versions
+library(dada2)
+library(tidyverse)
+```
+
+# Data
+```{r}
+# directory should be the path to the directory containing the fastq files after unzipping
+path <- "Data/eDNA_files/trimmed"
+list.files(path)
+```
+
+Reading forward and reverse fastq files
+```{r}
+fnFs <- sort(list.files(path, pattern = "_R1_trimmed.fastq", full.names = TRUE)) # foward reads
+fnRs <- sort(list.files(path, pattern = "_R2_trimmed.fastq", full.names = TRUE)) # reverse reads
+
+# extract sample names
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`,1) # extracts the base name (eg e00005-A, B etc)
+```
+
+Quality control - visualization
+this isn't working because its unable to open the connection. Checking quality of reads is impt for making sure the reads overlap and map out the fewq of score at each base position. What is a good mean quality score?
+```{r}
+plotQualityProfile(fnFs[c(1,6)]) 
+plotQualityProfile(fnRs[1:2]) #
+
+# this gives information on what we should trim them by
+# for forward reads I would trim at 145 bp - where it drops off
+# for reverse reads there is some variation, but would trim at around 125 bp
+# can adjust based on downstream information and how it influences the data. 
+```
+
+# Filter and Trim 
+This step only needs to be done once. 
+See comments within code
+```{r}
+# make sure to drop the files that dont make sense - undetermined reads (R1/R2) because the quality is poor and read is generally not good
+# there's no code associated with this but basically pull out reads named "undetermined"
+# files <- list.files(path) 
+# undeter_names <- files %>%
+#   data.frame(names = .) %>%
+#   filter(str_detect(names, "Undetermined")) 
+# 
+# undeter_names <- undeter_names[,1]
+# 
+# # now move the undetermined files from the trimmed to the a folder you created called tossers within trimmed
+# file.copy(from=file.path(paste0(path,"/", undeter_names)),
+#            to=file.path(paste0(path, "/tossers","/", undeter_names)))
+# file.remove(from=file.path(paste0(path,"/",undeter_names)))
+
+# this should ONLY BE DONE ONCE
+```
+
+
+```{r}
+# rerun this if you *just* ran the code removing the undetermined files BEFORE you run the filterAndTrim
+fnFs <- sort(list.files(path, pattern = "_R1_trimmed.fastq", full.names = TRUE)) # foward reads
+fnRs <- sort(list.files(path, pattern = "_R2_trimmed.fastq", full.names = TRUE)) # reverse reads
+
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`,1) # extracts the base name (eg e00005-A, B etc)
+
+## now we can set up what the filtered files will be called
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+
+# add sample names
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+
+Filtering parameters (standard based on tutorial) - maxN = 0 (no Ns because req'd by dada2), truncQ = 2 (WHAT IS THIS), rm.phix = TRUE (AND THIS), maxEE = 2 (sets the max number of "expected errors" allows in a read) <- this is better than filtering by avg quality scores
+```{r}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(100,100), # trim for fwd and rvs 
+              maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=TRUE)
+
+# this filtering step was difficult - when I used the truncLen c(145,125) so many of the sequences got dropped from each sample, so I reduced this to 125, 125 and then eventually to 100,100
+
+head(out)
+
+out.df <- as.data.frame(out)
+unique(out.df$reads.out)
+filter(out.df, reads.in == 0)
+
+# maxEE - max expected errors, place where we can adjust, esp if the data looks really messy
+# truncLen - sets the removing low quality tails while maintaining OVERLAP (based on how we set up sequencing)
+# In truncLen this is where we would put the drop off at 145 and 125 bp trim. 
+```
+
+```{r}
+tossers <- out[out[,2] == 0,]
+tosser.names <- rownames(tossers)
+
+# this is to remove the 0 reads from the filter
+tosser.df <- data.frame(tosser.names)
+
+tossF <- filter(tosser.df, str_detect(tosser.names, "_R1_"))
+tossF <- tossF[,1]
+tossF.base <- sapply(strsplit(basename(tossF), "_"), `[`,1)
+tossF2 <- paste0(tossF.base, "_F_filt.fastq.gz")
+  
+tossR <- filter(tosser.df, str_detect(tosser.names, "_R2_"))
+tossR <- tossR[,1]
+tossR.base <- ifelse(length(tossR == 0), NA, sapply(strsplit(basename(tossR), "_"), `[`,1))
+tossR2 <- paste0(tossR.base, "_R_filt.fastq.gz")
+
+# check to make sure one of these isn't empty
+tossR2.df <- data.frame(names = tossR2)
+tossF2.df <- data.frame(names = tossF2)
+  
+toss <- rbind(tossR2.df, tossF2.df) %>%
+  filter(!str_detect(names, "NULL_"))
+
+ 
+toss <- toss[,1]
+
+# # move a set of files
+file.copy(from=file.path(paste0(path,"/", tosser.names)),
+           to=file.path(paste0(path, "/tossers","/", tosser.names)))
+# # remove those from the original directory
+file.remove(from=file.path(paste0(path,"/",tosser.names)))
+
+## also remove those files from the filtered directory
+# # move a set of files
+# file.copy(from=file.path(paste0(paste0(path, "filtered"),"/", toss)),
+#            to=file.path(paste0(path, "/tossers","/", toss)))
+# 
+# file.remove(from = file.path(paste0(paste0(path, "filtered"), "/", toss))) # it may say that theres none there - thats okay
+```
+
+So now since you've moved the "tossers" you should rerun the filter and trim command
+so once we've run this code once - the tossers have already been put in the "tossed" file folder
+...Maybe
+```{r}
+sample.names2 <- data.frame(names = sample.names) %>%
+  filter(!(names %in% tossF.base)) 
+
+sample.names2 <- sample.names2[,1]
+  
+filtFs2 <- file.path(path, "filtered", paste0(sample.names2, "_F_filt.fastq.gz"))
+filtRs2 <- file.path(path, "filtered", paste0(sample.names2, "_R_filt.fastq.gz"))
+
+# add sample names
+names(filtFs2) <- sample.names2
+names(filtRs2) <- sample.names2
+```
+
+
+From DADA2 tutorial -- Considerations for your own data: The standard filtering parameters are starting points, not set in stone. If you want to speed up downstream computation, consider tightening maxEE. If too few reads are passing the filter, consider relaxing maxEE, perhaps especially on the reverse reads (eg. maxEE=c(2,5)), and reducing the truncLen to remove low quality tails. Remember though, when choosing truncLen for paired-end reads you must maintain overlap after truncation in order to merge them later.
+For ITS sequencing, it is usually undesirable to truncate reads to a fixed length due to the large length variation at that locus. That is OK, just leave out truncLen. See the DADA2 ITS workflow for more information
+
+
+# Error Rates
+```{r}
+# Forward then reverse, should take a couple minutes to run
+errF <- learnErrors(filtFs2, multithread=TRUE)
+errR <- learnErrors(filtRs2, multithread=TRUE)
+
+# Visualize the estimated error rates
+plotErrors(errF, nominalQ=TRUE)
+plotErrors(errR, nominalQ=TRUE)
+# Gives the error rates for the possible transition from A - C or A to G. 
+# Points are observed error, black line is the est error rates after convergence (of ML algo)
+# red lines are the error rates expected under the norm dist of Q score. 
+# the black line should be a good fit to the observed rates (points), error should drop with quality. 
+```
+
+# Sample Inference (what is this?)
+```{r}
+dadaFs <- dada(filtFs2, err = errF, multithread = TRUE, pool = "pseudo")
+dadaRs <- dada(filtRs2, err = errR, multithread = TRUE,  pool = "pseudo")
+
+# inspect the dada-class object
+dadaFs[[1]]
+# what is the dada algo inferred seq variants? and from how many unique seq in the first sample
+```
+Considerations for your own data: DADA2 also supports 454 and Ion Torrent data, but we recommend some minor parameter changes for those pyrosequencing technologies. The adventurous can explore ?setDadaOpt for other adjustable algorithm parameters.
+
+Extensions: By default, the dada function processes each sample independently. However, pooling information across samples can increase sensitivity to sequence variants that may be present at very low frequencies in multiple samples. The dada2 package offers two types of pooling. dada(..., pool=TRUE) performs standard pooled processing, in which all samples are pooled together for sample inference. dada(..., pool="pseudo") performs pseudo-pooling, in which samples are processed independently after sharing information between samples, approximating pooled sample inference in linear time.
+ 
+I think I care about the above point - how should I go about pooling the sample for matching and ASV generation? This is referring to technical replicates correct?
+
+
+Merge paired reads
+We now merge the forward and reverse reads together to obtain the full denoised sequences. Merging is performed by aligning the denoised forward reads with the reverse-complement of the corresponding denoised reverse reads, and then constructing the merged “contig” sequences. By default, merged sequences are only output if the forward and reverse reads overlap by at least 12 bases, and are identical to each other in the overlap region (but these conditions can be changed via function arguments).
+
+```{r}
+mergers <- mergePairs(dadaFs, filtFs2, dadaRs, filtRs2, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+head(mergers[[1]])
+
+unique(mergers[[1]])
+```
+Considerations for your own data: Most of your reads should successfully merge. If that is not the case upstream parameters may need to be revisited: Did you trim away the overlap between your reads?
+
+
+Compute ASV tables
+```{r}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+```
+The sequence table is a matrix with rows corresponding to (and named by) the samples, and columns corresponding to (and named by) the sequence variants. This table contains 285 ASVs, and the lengths of our merged sequences all fall within the expected range for this V4 amplicon.
+
+Considerations for your own data: Sequences that are much longer or shorter than expected may be the result of non-specific priming. You can remove non-target-length sequences from your sequence table (eg. seqtab2 <- seqtab[,nchar(colnames(seqtab)) %in% 250:256]). This is analogous to “cutting a band” in-silico to get amplicons of the targeted length.
+ 
+ 
+Remove chimeras
+The core dada method corrects substitution and indel errors, but chimeras remain. Fortunately, the accuracy of sequence variants after denoising makes identifying chimeric ASVs simpler than when dealing with fuzzy OTUs. Chimeric sequences are identified if they can be exactly reconstructed by combining a left-segment and a right-segment from two more abundant “parent” sequences.
+
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+
+sum(seqtab.nochim)/sum(seqtab)
+```
+
+The frequency of chimeric sequences varies substantially from dataset to dataset, and depends on on factors including experimental procedures and sample complexity. Here chimeras make up about 21% of the merged sequence variants, but when we account for the abundances of those variants we see they account for only about 4% of the merged sequence reads.
+
+Considerations for your own data: Most of your reads should remain after chimera removal (it is not uncommon for a majority of sequence variants to be removed though). If most of your reads were removed as chimeric, upstream processing may need to be revisited. In almost all cases this is caused by primer sequences with ambiguous nucleotides that were not removed prior to beginning the DADA2 pipeline.
+ 
+
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+
+#write.csv(track, "csv_outputs/summary_table_DADA2.csv")
+```
+
+
+## Export files for taxonomy and samples/ASVs
+
+```{r regseqs-asv-output}
+ #make fasta file with ASVs
+    asv_seqs=colnames(seqtab.nochim)
+    for(i in 1:length(asv_seqs))
+    {
+        write.table(paste(">ASV",i, sep=""),file="csv_outputs/MiFish_ASV_seqtab_nochim.csv", append=TRUE, col.names = F, row.names = F, quote=F)
+        write.table(paste(asv_seqs[i], sep=""),file="csv_outputs/MiFish_ASV_seqtab_nochim.csv", append=TRUE, col.names = F, row.names = F, quote=F)
+    }
+```
+
+This is the ASV table that canbe used for blastn search
+
+Goal: change ASV headers to numbered ASVs that correspond to those output in the FASTA file.
+```{r first-for-poolseqs}
+# Make map between brief names and full sequences
+briefToSeq <- colnames(seqtab.nochim)
+names(briefToSeq) <- paste0("Seq", seq(ncol(seqtab.nochim))) # Seq1, Seq2, ...
+# Make new sequence table with brief names
+st.brief <- seqtab.nochim
+colnames(st.brief) <- names(briefToSeq)
+
+# export the pool seq table with brief names:
+# write.csv(st.brief, file="csv_outputs/MiFish_ASVtable.csv")
+```

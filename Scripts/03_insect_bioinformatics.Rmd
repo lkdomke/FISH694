@@ -1,0 +1,141 @@
+---
+title: "insect_biominformatics"
+author: "Lia Domke"
+date: "4/20/2023"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+This script is based on the below tutorial by shawn wilkinson - some of the relevant information is brought over from that script, but it'd be good to review that as well. 
+https://shaunpwilkinson.github.io/post/insect-vignette/
+
+This script requires the ASV table from DADA2 tutorial
+Ultimately you need to transform that ASV table to a DNAbin for classification. 
+```{r}
+#install.packages("insect")
+library(insect)
+library(tidyverse)
+```
+
+You need to download the classifier that is PRIMER SPECIFIC
+This classifier is for MiFish
+
+```{r}
+# download.file("https://www.dropbox.com/s/fv3dpvws6zjvtib/classifier.rds?dl=1", 
+#               destfile = "classifier.rds", mode = "wb")
+
+# this downloads the classifier called classifier.rds into your working directory - only needs to be done once
+```
+
+
+First we need to classify sequences
+The input for this is the seqtab.nochim
+```{r}
+# input read in seqtab.nochim
+nochim <- read.csv("Data/eDNA_analysis/blast_DADA2_outputs/MiFish_ASV_seqtab_nochim.csv")
+#nochim2 <- read.csv("csv_outputs/MiFish_ASV_seqtab_nochim_LD_04-20-23.csv")
+
+asv <- read.csv("Data/eDNA_analysis/blast_DADA2_outputs/MiFish_ASVtable.csv")
+```
+
+
+
+```{r}
+data(samoa) # the colum names should have the sequences
+# samoa is the sample dataset used in the example tutorial
+head(nochim)
+# these two data types don't match need to adjust the nochim data to match how samoa is formated
+
+# the row 1 is a seq related to ASV1 
+# need to insert one row above the first named correctly
+
+# okay lets extract the asv numbers by themselves 
+asv.names <- nochim %>%
+  data.frame() %>%
+  mutate(sample.names = str_extract(X.ASV1, "ASV\\d*")) %>% # extract any instance of ASV and whatever followed
+  dplyr::select(sample.names) %>%
+  na.omit() %>%
+  rbind("ASV1") %>%
+  mutate(num = as.numeric(str_extract(sample.names, "\\d+"))) %>%
+  mutate(chr = str_extract(sample.names, "ASV")) %>%
+  arrange(num) %>%
+  dplyr::select(sample.names)
+
+nochim1.2 <- nochim %>%
+  data.frame() %>%
+  mutate(sample.names = str_extract(X.ASV1, "ASV\\d*")) %>%
+  filter(is.na(sample.names)) %>%
+  rename(seq = X.ASV1) %>%
+  dplyr::select(seq)
+
+# okay so now we've isolated the ASV and the seq and they've maintained order so just join back together
+
+# now we need the sequences to be the column names
+nochim.seq <- cbind(asv.names, nochim1.2) %>%
+  pivot_wider(names_from = "seq", values_from = "sample.names")
+```
+
+```{r}
+## get sequences from table column names
+x <- char2dna(colnames(nochim.seq))
+## name the sequences sequentially
+names(x) <- paste0("ASV", seq_along(x))
+## optionally remove column names that can flood the console when printed
+colnames(asv) <- NULL 
+
+## get sequences from table column names
+x2 <- char2dna(colnames(nochim2))
+## name the sequences sequentially
+names(x2) <- paste0("ASV", seq_along(x2))
+## optionally remove column names that can flood the console when printed
+colnames(nochim2) <- NULL 
+```
+
+
+Next step is to load the classifier
+
+this is an "insect" class object and is a large dendrogram with attributes for classifying sequences
+```{r}
+classifier <- readRDS("classifier.rds")
+classifier
+names(attributes(classifier))
+```
+
+
+
+Now we assign taxon IDS and CI to each ASV 
+
+- classify function may take a minute or so
+- right now ping = 1 which means it'll only return sequences with 100% identity are considered matches
+
+**note** this can be run in parallel by setting: 
+cores argument to 2 or more 
+(setting cores = "autodetect") will have it run on one less than available. 
+
+Other computational considerations:
+- if choosing autodetect on a large classifier like COI 
+then you MUST have 2 GB of available RAM per processor 
+
+DADA2 output already has the sequence counts so we set tabulize = FALSE
+
+In the case where a list of sequences containing replicates is to be processed, users can prefix the sequence names with their respective sample names, delimited with an underscore (e.g. “sample001_sequence001”) and set tabulize = TRUE. In this case, the classify function will automatically count and dereplicate the sequences, producing an output table with one column of sequence counts for each sample.
+
+
+BELOW IS THE COMPUTATIONALLY INTENSIVE STEP MAKE SURE YOU'RE READY FOR IT:
+```{r}
+longDF <- classify(x, classifier, threshold = 0.8, tabulize = FALSE, species = "all", cores = "autodetect",
+                   metadata = TRUE, ping = FALSE)
+
+# try out using ping = True too
+```
+
+
+For DADA2 users, the ASV abundance table can now be transposed and appended to the table of taxonomic information if required:
+
+```{r}
+longDF <- cbind(longDF, t(nochim.seq))
+
+#write.csv(longDF, "Data/insect_taxonomy_output.csv")
+```
+
