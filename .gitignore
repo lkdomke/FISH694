@@ -30,3 +30,9 @@ Data/.DS_Store
 .Rproj.user/69C7AD83/rmd-outputs
 .Rproj.user/69C7AD83/saved_source_markers
 .Rproj.user
+Data/eDNA_files/.DS_Store
+Data/eDNA_files/trimmed/.DS_Store
+Data/eDNA_files/trimmed/.RData
+*.fastq
+*.gz
+Data/eDNA_files/trimmed/tossers/.DS_Store
