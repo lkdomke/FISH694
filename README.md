@@ -6,6 +6,7 @@ Included in the /scripts folder are the scripts associated with the course proje
 This workflow uses data collected from summer 2021 
 (water samples of nearshore fish communities in eelgrass and understory kelp beds in southern Southeast Alaska). 
 These data were filtered, extracted, and sequenced before and the scripts in this repository start from the sequenced Illumina data. 
+The data *are not included* in this repository (to big to be stored here) - please contact author (Lia Domke) for access to data. 
 
 Steps include: 
 
