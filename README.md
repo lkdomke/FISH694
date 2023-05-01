@@ -32,7 +32,7 @@ BLASTn and Insect
 **BLASTn**
 
 BLASTn needs to be done through the HPC or VM - go back to 01_edna_bioinformatic.sh script
-see BLASTn guide[link]https://blast.ncbi.nlm.nih.gov/doc/blast-help/downloadblastdata.html
+see BLASTn guide https://blast.ncbi.nlm.nih.gov/doc/blast-help/downloadblastdata.html
 Then outputs from this script need to be cleaned manually (custom R scripts) go to -->
 
 02_blastn_taxonomic_filtering.Rmd script
