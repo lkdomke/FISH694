@@ -14,10 +14,12 @@ edna-bioninformatic.sh script
 
   - contains the HPC related steps (used UAF Chinook 04)
   - input: demultiplexed fastq files from Illumina MiSeq (files are in .fastq.gz format)
-      - process includes using cutadapt to remove primer adaptors
-      - reading out .fastq files
+  - process includes using cutadapt to remove primer adaptors
+  - reading out .fastq files
 
 01_DADA2_bioinformatics.Rmd script
+
+see https://benjjneb.github.io/dada2/tutorial.html
 
   - follows DADA2 tutorial (uses R)
   - input .fastq files that are demultiplexed and have primers removed
@@ -30,6 +32,7 @@ BLASTn and Insect
 **BLASTn**
 
 BLASTn needs to be done through the HPC or VM - go back to 01_edna_bioinformatic.sh script
+see BLASTn guide[link]https://blast.ncbi.nlm.nih.gov/doc/blast-help/downloadblastdata.html
 Then outputs from this script need to be cleaned manually (custom R scripts) go to -->
 
 02_blastn_taxonomic_filtering.Rmd script
