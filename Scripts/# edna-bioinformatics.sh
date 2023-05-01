@@ -462,6 +462,9 @@ scp -r lkdomke@chinook04.alaska.edu:/center1/FISH694/lkdomke/edna .
 
 # go to 01_DADA2_bioinformatics.Rmd - complete the steps there BEFORE coming back to this script. 
 
+
+## MAKE SURE YOU'VE DONE THE OTHER STEPS IN DADA2 BEFORE RUNNING THE SCRIPT BELOW (you won't be able to anyway)
+
 # output of the r scripts were two csv files
 # MiFish_ASV_seqtab_nochim.csv and MiFish_ASVtable.csv within a csv_outputs folder
 # move folder to hpc
@@ -481,8 +484,10 @@ update_blastdb.pl --decompress nt
 
 # then you have to appropriately set up the nucleotide database using: 
 # since you installed blast in the cutadapt env this should work
-# see makeblastdb --h if you're unsure about format
-makeblastdb -in [input database] -out [output database] -dbtype [database type] 
+# see makeblastdb -help if you're unsure about format
+makeblastdb -in [input database] -out [output database] -dbtype nucl 
+# fill in the []
+makeblastdb -in nt -out nt_db -dbtype nucl
 
 # this is the blastn base script - remember not good to run things in the login node, trouble shoot using the partition = debug
 nohup blastn -db nt -query MiFish_ASV_seqtab_nochim.csv -perc_identity 96 -qcov_hsp_perc 100 -out MiFish_ASV_blast.out -outfmt "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore sscinames staxids"
